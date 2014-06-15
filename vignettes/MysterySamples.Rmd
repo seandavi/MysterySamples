@@ -1,0 +1,156 @@
+%\VignetteEngine{knitr::knitr}
+%\VignetteIndexEntry{Mystery Samples Vignette}
+## Introduction
+
+This is a highly contrived problem, but it is still illustrative and should be fun.  It is meant to be self-directed, but feel free to work with others.
+
+An experiment was performed that involved collecting gene expression measures on the hgu133a single-color array from Affymetrix from *5 pairs of samples* representing *5 normal tissues*.  Though this array is old, the concepts and analytical approaches are applicable to some extent to all gene expression studies.  The workflow of this vignette will involve the following steps:
+
+- preprocessing using the `oligo` package
+- produce basic QC plots
+- perform unsupervised clustering and sample relationship visualization
+- perform differential expression using the `limma` package
+
+The goal of this exercise is to use the data to derive the identities of the normal tissues.
+
+## Preprocessing
+
+The Affymetrix hgu133a array product uses several probes that need to be summarized to produce a final _relative_ expression measure per transcript/gene.  These probes, after summarization, are called probesets and each has a unique ID.  This unique ID can then be used as a key to what is being measured by the probeset.
+
+The file format is called the ".CEL" format and represents the raw output of the microarray scanner.  There is one file per sample.  We will use the `oligo` package to load the raw data into R in one batch.
+
+To get started, we need to get the names of the .CEL files.  We can use the `list.files()` function in R to read all the files in a directory that have a specific pattern.  In addition, since the .CEL files are included in this package, we are going to use the `system.file()` function to find the location of the package as it is installed into R to get the right directory.
+
+```{r celfileNames}
+celpath = system.file('extdata',package='MysterySamples')
+celpath
+celfiles = list.files(celpath,pattern='.CEL.gz',full.names=TRUE)
+celfiles
+```
+
+*Question:*  How many .CEL file names were found?
+
+*Answer:*  Consider using the `length()` function on the `celfiles` object.
+
+Now that we have found the filenames for each of the files, we can use the `oligo` package to read these files into R.
+
+```{r loadCelFiles}
+# Load the oligo package in order to use it
+library(oligo)
+efs = read.celfiles(celfiles)
+efs
+```
+
+So, the `efs` object represents the raw probe data for 10 samples and 506944 probes (called features here).  We can get a numeric summary of the data using the `summary()` R function.  Do that now.  Do you see anything worrisome about the data after summarizing?
+
+We are going to want to convert the sample names to something that we can use to attach some sample annotation.  We are going to use the `sub()` R function to do that.  
+
+```{r fixSampleNames}
+sampleNames(efs)
+# we can use the sub() function to remove the
+# .CEL.gz from the sampleNames
+sampleNames(efs)=sub('\\.CEL\\.gz','',sampleNames(efs))
+sampleNames(efs)
+```
+
+### Process with RMA
+
+For the Affymetrix microarray platform, a "standard" approach to preprocessing is the *RMA* algorithm, conveniently implemented in the `oligo` package as the `rma()` method.  Simply running `rma()` on the data results in a normalized `ExpressionSet`.
+
+```{r rma}
+eset = rma(efs)
+eset
+class(eset)
+# try help('ExpressionSet') for details
+```
+
+The `eset` object is an object of class `ExpressionSet`. The `ExpressionSet` is a Bioconductor data structure (an _S4_ class) that is designed specifically to hold the combination of data:
+
+1. Sample information (the phenoData or `pData`)
+2. Gene/feature information (the featureData or `fData`)
+3. The data collected from the assay, such as gene expression values (the assayData, often accessible using `exprs`)
+
+*TODO: Three table figure*
+
+## Basic Data Exploration
+
+An analysis of a dataset often begins with basic data exploration.  We can start with getting a sense of scale of the data using `dim()`, `nrow()`, and `ncol()`.
+
+```{r dimensions}
+nrow(eset)
+ncol(eset)
+dim(eset)
+```
+
+And how about a summary of the expression values:
+
+```{r summaryExpression}
+summary(exprs(eset))
+```
+
+We can get a visual representation of the expression data using a boxplot.  
+
+```{r boxplots,fig.cap='Boxplot of sample expression values',fig.width=10,fig.height=10}
+# make labels perpendicular to the plot
+par(las=2)
+boxplot(exprs(eset))
+```
+
+And we can compare sample similarities by plotting their expression values as a set of scatter plots.  The construction of the plot can be built up from pieces.  To get the expression values for all the samples, we can use `exprs(eset)`; this will be a matrix.  To limit to the matrix to only four columns (just to keep the plot small), we can subset the columns like so: `exprs(eset)[,1:4]`.  This matrix will have only four columns representing all the expression values for the first four samples.  Finally, we apply the `pairs` function to the resulting matrix.
+
+```{r pairsPlot,fig.cap='A scatterplot matrix of four samples.  Note the differences in "scatter" between pairs of samples.  Do you think that has any biological interpretation given the experimental design?',fig.width=10,fig.height=10}
+pairs(exprs(eset)[,1:4],pch='.')
+```
+
+### Sample Relationships
+
+Often, we want to see how similar (or dissimilar) samples are to each other.  Clustering and dimensionality reduction techniques like principle components analysis (PCA) and multidimensional scaling (MDS) can be very useful tools for looking at samples at a high level.  Before doing so, though, we often want to choose the most "interesting" features from the data; we want to choose features that vary among the samples.  A simple approach for choosing features that vary is to use the *standard deviation* of the feature and use some proportion (top 200, arbitrary) of the most variable features to look at sample relationships.
+
+```{r topStandardDeviation}
+featuresds = apply(exprs(eset),1,sd)
+length(featuresds)
+topVarFeatures = order(featuresds,decreasing=TRUE)[1:200]
+length(topVarFeatures)
+head(topVarFeatures)
+```
+
+The `topVarFeatures` contains the row numbers from the expression data that have the 200 highest standard deviations.  We can use this subset of the features to make a heatmap of the data.  A heatmap is simply a two-dimensional clustering of samples and genes.
+
+```{r heatmapTop200,fig.cap='Heatmap of the top 200 most variable genes and the sample relationships',fig.width=10,fig.height=10}
+library(pheatmap)
+pheatmap(exprs(eset)[topVarFeatures,],scale='row',show_rownames=FALSE)
+```
+
+*Question:* How many sample clusters do you see?
+
+*Question:* What do these sample clusters likely represent?
+
+An alternative visualization method is the MDS plot.  This is a two-step process:
+
+1. Compute the multidimensional scaling to reduce the dimensionality of the data from 200 dimensions (200 most variable features)
+2. Plot the samples in the resulting dimensionality-reduced two-dimensional space
+
+```{r mdsplot,fig.caption='MDS plot showing sample locations in red circles.',fig.width=10,fig.height=10}
+mdsdat = cmdscale(dist(t(exprs(eset)[topVarFeatures,])))
+plot(mdsdat,col='red',cex=2)
+text(mdsdat,labels=sampleNames(eset))
+```
+
+*Question:* Again, how many clusters do you see?
+
+## Differential expression
+
+We will use the `limma` package for performing differential expression.  Up to now, we have treated the samples independently.  The experimental design was done so that each of five normal tissues was performed twice.  I have provided the mapping from the "GSM" accessions to tissue types, but only as tissue numbers.  We will be using `limma` to do a differential expression analysis to find genes that differentiate the samples from each other.  Then, we will make a heatmap of the genes and use that to help you identify the _actual_ tissue identities.
+
+Attach the tissue types to the `pData` part of the `ExpressionSet`.
+
+```{r attachTissueTypes}
+# get the data mapping from the MysterySamples data directory
+# I put this into the package; you would normally need to
+# supply the sample information for your own samples
+data(samples,package='MysterySamples')
+samples
+# I assign the sample information to the pData slot, being
+# careful to assign in the correct order by matching accessions
+pData(eset)=samples[match(samples$Accession,sampleNames(eset)),]
+```
